@@ -1,0 +1,199 @@
+#+TITLE: goda.vim hello world 解説
+#+SUBTITLE: Vim/Neovim から Go のプラグインを呼ぶ最小構成を読む
+#+DATE: 2026-10-29
+#+OPTIONS: toc:2 num:t
+#+LANGUAGE: ja
+
+この文書は、手元のリポジトリの =hello= プラグインを教材にして、
+goda.vim が「エディタと Go のバイナリ」の間で何をしているのかを順に追う。
+設定や API の暗記ではなく、*どこで情報が渡るか* を押さえるのが目的。
+
+* 全体像
+
+  goda.vim は Completion や LSP のような機能を提供しない。エディタと
+  プラグインの間の*メッセージ路*を用意するだけの土台で、機能はすべて
+  プラグイン側 (=Go のバイナリ=) が持つ。hello world はその土台を
+  最短で一周する例になっている。
+
+  #+begin_example
+  Vim script (autoload/goda.vim)
+    | job_start() / jobstart()
+    | 双方向の channel、JSON メッセージ
+    v
+  +---------------------------+
+  | hello (Go バイナリ)       |
+  |  host.Main(hello{})       |
+  |  └ Handlers["greet"]      |
+  +---------------------------+
+    | h.Call(ctx, "getcwd")
+    v
+  エディタの Vim 関数 (getcwd())
+  #+end_example
+
+  呼び出しの向きは 2 種類ある。
+
+  - エディタ → プラグイン: =goda#request('hello', 'greet', 'world')=
+  - プラグイン → エディタ: =h.Call(ctx, "getcwd")=
+    (=sdk.Host= 経由。Vim 関数、式評価、Ex コマンドが呼べる)
+
+* ファイル構成
+
+  | パス            | 役割                                       |
+  |-----------------+--------------------------------------------|
+  | =hello/main.go= | プラグイン本体 (メソッド 1 つ)             |
+  | =hello/go.mod=  | =goda.vim= を =replace= で手元の clone に  |
+  | =run-vim.sh=    | ビルドして Vim/Neovim に読み込ませる       |
+  | =check.vim=     | Vim 用のヘッドレス確認                     |
+  | =check.lua=     | Neovim 用のヘッドレス確認                  |
+  | =flake.nix=     | go 入りの開発シェル                        |
+
+* Go 側: プラグインは 2 つのメソッドを持つ構造体
+
+  #+begin_src go
+  type hello struct{}
+
+  func (hello) Name() string { return "hello" }
+
+  func (hello) Handlers() map[string]sdk.Handler {
+      return map[string]sdk.Handler{
+          "greet": func(ctx context.Context, h sdk.Host, params []any) (any, error) {
+              cwd, err := h.Call(ctx, "getcwd")
+              if err != nil {
+                  return nil, err
+              }
+              return fmt.Sprintf("hello, %v, from %s (cwd %v)", params[0], h.Meta().Host, cwd), nil
+          },
+      }
+  }
+
+  func main() { host.Main(hello{}) }
+  #+end_src
+
+  =sdk.Plugin= インターフェースは =Name()= と =Handlers()= の 2 つだけ。
+
+  - =Name()= はプラグイン名。正規表現 =^[a-z][a-z0-9_]*$= に従い、
+    =goda= は予約済み (goda 自身のメソッドに使われる)。
+  - =Handlers()= はメソッド名 → 関数の表。メソッド名は
+    =^[A-Za-z_][A-Za-z0-9_]*$=。
+
+  エディタからは =goda#request('hello', 'greet', ...)= という形で届き、
+  =hello= が =Name()=、=greet= が =Handlers()= のキーに対応する。
+
+** ハンドラの引数
+
+  =Handler= の型は
+  =func(ctx context.Context, h sdk.Host, params []any) (any, error)=。
+
+  - =params= は「汎用の値」しか入らない。=nil=、=bool=、=int64=、
+    =float64=、=string=、=[]any=、=map[string]any= のいずれか。
+    Vim script の値も Neovim の値も JSON を経由してこの形に正規化される。
+  - 型付きの値が欲しいときは =sdk.Decode(params[0], &dst)= で JSON 経由の
+    コピーをする (json タグが効き、数値の表現差も吸収される)。
+  - 戻り値も同じ汎用の形か、JSON を往復できる型。型付きの値を返したい
+    ときは =sdk.Generic(v)=。
+
+  この例では =params[0]= をそのまま =%v= で表示しているので、引数は
+  「何でも受け取って文字列化する」形になっている。数値でも文字列でも
+  壊れない代わりに、型で守られていない点には注意。
+
+** ハンドラからエディタを呼ぶ
+
+  =h.Call(ctx, "getcwd")= は Vim の =getcwd()= を呼び、その戻り値を
+  JSON デコードして返す。=sdk.Host= にはこのほかに =Notify= (戻り値を
+  待たない)、=Eval= (Vim 式)、=Cmd= (Ex コマンド) がある。
+
+  =h.Meta().Host= は接続元を示す文字列で、=vim=、=nvim=、=none= の
+  いずれか。=none= はエディタのいない jsonl 開発用トランスポート。
+  この値がそのまま =from vim= / =from nvim= という表示になる。
+
+  =Host= インターフェースは*増やさない*方針で、機能追加は型アサーションで
+  見つける別インターフェースとして足す (=sdk.Closer= が例)。理由は、
+  メソッドを足すとモジュール外の実装 (テスト用のフェイクなど) が全部壊れるため。
+
+* エディタ側: autoload/goda.vim がトランスポートを選ぶ
+
+  =goda#start(path)= がバイナリを job で起動する。どのトランスポートかは
+  goda.vim が判定して =--transport=vim|nvim|jsonl= を渡すので、
+  プラグイン側で分岐を書く必要はない。
+
+  =host.Main= はフラグを解析して対応する =Serve= を選ぶだけの薄い入口で、
+  実装は =host/vim=、=host/nvim=、=host/jsonl= に分かれている。
+
+  注目すべきは =sdk.Protocol= (現在 =1=)。autoload 側の =s:protocol= と
+  同じ番号を持ち、両者が揃わないとハンドシェイク (=goda.hello=) で失敗する。
+  古いバイナリと新しい autoload が黙って噛み合わないための番号で、
+  テストで一致が保たれている。
+
+* 実際に動かす
+
+** エディタ経由
+
+   #+begin_src sh
+   ./run-vim.sh            # Neovim なら EDITOR_VIM=nvim ./run-vim.sh
+   #+end_src
+
+   スクリプトは =hello= をビルドし、=runtimepath= に =goda.vim= を足して
+   =goda#start()= を呼び、=:Greet= と =<F5>= を用意する。
+   =:Greet= は =goda#request('hello', 'greet', 'world')= を実行するので、
+   ステータスラインに次のように出る。
+
+   #+begin_example
+   hello, world, from vim (cwd /path/to/goda-hello/hello)
+   #+end_example
+
+** エディタなし
+
+   #+begin_src sh
+   cd hello
+   go build -o hello .
+   echo '{"method":"goda.plugins"}' | ./hello --transport=jsonl
+   # {"result":{"hello":["greet"]}}
+   #+end_src
+
+   =goda.plugins= は goda.vim 自身が提供する予約メソッドで、登録された
+   プラグイン名とそのメソッド一覧を返す。エディタ無しで「何が生えているか」
+   を確認できるので、デバッグの最初の一手になる。
+
+** ヘッドレス確認
+
+   #+begin_src sh
+   GODA_CHECK_OUT=/tmp/vim.out  vim -Nu NONE -i NONE -es -S check.vim
+   GODA_CHECK_OUT=/tmp/nvim.out nvim --headless -u NONE -S check.lua
+   #+end_src
+
+   どちらのスクリプトも自分の位置から =goda.vim/= と =hello/hello= を
+   解決するので、リポジトリをどこに置いても動く。出力先は環境変数
+   =GODA_CHECK_OUT= で指定し、未指定なら tempfile に書く。
+
+* 読む順番の提案
+
+  1. =hello/main.go= — プラグインの最小形 (Name と Handlers)
+  2. =sdk/sdk.go= の =Handler= と =Host= — 境界の型
+  3. =autoload/goda.vim= の =goda#start= と =goda#request= — 起動と配送
+  4. =host/host.go= の =Serve= — トランスポート選択と終了処理
+  5. =host/jsonl= — エディタ抜きで試せる最小の実装
+
+  この順で読むと、「プラグインはただの Go のプロセス」「エディタはただの
+  関数呼び出しの相手」という 2 つの事実だけで全体が説明できるのが分かる。
+
+
+** 解説記事
+
+*** denopsの話
+*** goda.vimのコンセプト
+*** goda.vimのアーキテクチャ
+*** 使いかた
+
+プラグインをruntimepathに入れる
+
+#+begin_src lua
+vim.opt.runtimepath:prepend("/home/coma/.ghq/github.com/Comamoca/goda-hello")
+#+end_src
+
+
+#+begin_src vim
+here=$(cd "$(dirname "$0")" && pwd)
+call goda#start('$here/hello/hello')
+
+command! -nargs=0 Greet echo goda#request('hello', 'greet', 'world')
+#+end_src
