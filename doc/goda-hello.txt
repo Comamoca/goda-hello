@@ -1,0 +1,64 @@
+*goda-hello.txt*  Hello world plugin for goda.vim              *goda-hello*
+
+==============================================================================
+CONTENTS                                            *goda-hello-contents*
+
+  1. Introduction ........................... |goda-hello-introduction|
+  2. Commands ............................... |goda-hello-commands|
+  3. Functions .............................. |goda-hello-functions|
+  4. Variables .............................. |goda-hello-variables|
+  5. Setup .................................. |goda-hello-setup|
+
+==============================================================================
+1. INTRODUCTION                                 *goda-hello-introduction*
+
+goda-hello is the hello world example for goda.vim, a Go based framework
+that lets Vim and Neovim talk to Go binaries.
+
+The plugin is a single Go binary that registers itself under the name
+"hello" and implements one method, "greet".
+
+==============================================================================
+2. COMMANDS                                        *goda-hello-commands*
+
+:Greet                                                  *:Greet*
+        Greet the world through the "hello" plugin and echo the result.
+
+==============================================================================
+3. FUNCTIONS                                      *goda-hello-functions*
+
+goda_hello#greet({args}...)                           *goda_hello#greet()*
+        Call the "greet" method of the "hello" plugin. The binary is started
+        on demand if it is not running yet. Returns the greeting string.
+
+goda_hello#start()                                 *goda_hello#start()*
+        Start the binary. Returns its path, or an empty string when the
+        binary cannot be found.
+
+goda_hello#bin()                                       *goda_hello#bin()*
+        Return the path of the binary, or an empty string when it cannot
+        be found.
+
+==============================================================================
+4. VARIABLES                                      *goda-hello-variables*
+
+                                                    *g:goda_hello_bin*
+g:goda_hello_bin
+        Path to the "goda-hello" binary. When unset, the binary is looked up
+        next to the plugin directory, first in "bin/", then in "result/bin/",
+        and finally in "../../bin/" for the Nix package layout.
+
+==============================================================================
+5. SETUP                                                *goda-hello-setup*
+
+The plugin works from a checkout, where the binary is built into
+"result/bin/" by "nix build": >
+
+    let g:goda_hello_bin = expand('<sfile>:p:h:h') .. '/result/bin/goda-hello'
+<
+The Nix package "goda-hello-vim-plugin" bundles the Vim script, goda.vim
+itself and the binary into one runtimepath directory: >
+
+    set runtimepath+=/nix/store/...-goda-hello-vim-plugin-0.1.0/lib/vim
+<
+vim:tw=78:ts=8:ft=help:norl:
