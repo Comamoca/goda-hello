@@ -45,10 +45,12 @@
           # Select a fixed list of files from the checkout. `lib.fileset`
           # has no per-file constructor, so the selection is the union of
           # the named paths: everything else in the checkout, including
-          # `.git` and `.direnv`, is left out. Each path must exist, so a
-          # file that moves fails the build instead of silently dropping
-          # out of the source tree.
-          filesOf = paths: lib.fileset.unions paths;
+          # `.git` and `.direnv`, is left out. A path that moves fails the
+          # build instead of silently dropping out of the source tree.
+          #
+          # The Go module files are optional: a module without dependencies
+          # has no go.sum, and `go build` does not need one.
+          filesOf = paths: lib.fileset.unions (map lib.fileset.maybeMissing paths);
 
           # The plugin itself: a single Go binary implementing the "hello" plugin.
           # Pure Go, no cgo, so the result is a static binary.
@@ -67,25 +69,29 @@
               root = ./.;
               fileset = filesOf [
                 ./hello/main.go
-                ./hello/go.mod
-                ./hello/go.sum
+                ./go.mod
+                ./go.sum
               ];
             };
-            # The module lives in a subdirectory of the source tree, so the
-            # builder has to look for go.mod there.
-            modRoot = "./hello";
-            vendorHash = "sha256-jxTLuTznN1lalqFftw27NWHHaCUgtdSaKkfT3xIk6q4=";
+            # The module lives at the root of the source tree, next to
+            # flake.nix, so the builder finds go.mod without modRoot.
+            vendorHash = "sha256-ZcBle89zEoNo8DjWmXFIanACY9fiaodktS/ukcId9Z0=";
             # `go mod vendor` records the replacement path verbatim in
             # vendor/modules.txt, so the path has to be stable across builds.
-            # A path relative to the module root is, while the store path of
-            # the input is not. The input is copied next to the module, and
-            # the module refers to it as `../goda-vim`.
+            # A fixed absolute path is, while the store path of the input is
+            # not: the Go tooling rejects a module whose go.mod and
+            # vendor/modules.txt disagree about where it was replaced from,
+            # and buildGoModule vendors in one derivation and builds in
+            # another, each with its own sandbox. The input is therefore
+            # copied to the fixed location below, and the module refers to it
+            # by that path. Changing the path invalidates `vendorHash`.
             preBuild = ''
-              cp -r --no-preserve=mode ${inputs.goda-vim} ../goda-vim
-              go mod edit -replace=github.com/Shougo/goda.vim=../goda-vim
+              cp -r --no-preserve=mode ${inputs.goda-vim} /build/goda-vim
+              go mod edit -replace=github.com/Shougo/goda.vim=/build/goda-vim
             '';
             # `go install` names the binary after the module, which is
-            # `hello`. The plugin and the editor side both expect
+            # the last element of the module path, `hello`. The plugin and
+            # the editor side both expect
             # `goda-hello`, so rename it. The rename happens before the
             # install phase copies the binaries into $out.
             postBuild = ''
